@@ -42,8 +42,6 @@ defmodule Taskweft.MCP.Server do
 
   use ExMCP.Server
 
-  alias Taskweft.NIF
-
   # ---------- TOOLS ----------
 
   deftool "plan" do
@@ -157,15 +155,38 @@ defmodule Taskweft.MCP.Server do
   # ---------- HANDLERS ----------
 
   @impl true
-  def handle_tool_call("plan", %{"domain_json" => d}, state),
-    do: tuple_result(Taskweft.plan(d), state)
+  def handle_tool_call("plan", %{"domain_json" => d}, state) do
+    case validate_domain(d) do
+      {:ok, normalized} -> tuple_result(Taskweft.plan(normalized), state)
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
 
   def handle_tool_call("replan", %{"domain_json" => d, "plan_json" => p} = args, state) do
-    tuple_result(Taskweft.replan(d, p, Map.get(args, "fail_step", -1)), state)
+    case validate_domain(d) do
+      {:ok, normalized} ->
+        tuple_result(Taskweft.replan(normalized, p, Map.get(args, "fail_step", -1)), state)
+
+      {:error, reason} ->
+        {:error, reason, state}
+    end
   end
 
   def handle_tool_call(name, _args, state),
     do: {:error, "unknown tool: #{name}", state}
+
+  # JSON-LD validation lives in the parent app (`Taskweft.JSONLD.Loader`)
+  # so this dep stays circular-free. When the umbrella is loaded the Loader
+  # is available and validates @type / name; standalone runs skip validation.
+  @loader Module.concat(["Taskweft", "JSONLD", "Loader"])
+
+  defp validate_domain(json) do
+    if Code.ensure_loaded?(@loader) and function_exported?(@loader, :load_string, 1) do
+      apply(@loader, :load_string, [json])
+    else
+      {:ok, json}
+    end
+  end
 
   defp text_result(result, state) when is_binary(result),
     do: {:ok, %{content: [text(result)]}, state}
