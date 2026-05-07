@@ -163,12 +163,13 @@ defmodule Taskweft.MCP.Server do
   end
 
   def handle_tool_call("replan", %{"domain_json" => d, "plan_json" => p} = args, state) do
-    case validate_domain(d) do
-      {:ok, normalized} ->
-        tuple_result(Taskweft.replan(normalized, p, Map.get(args, "fail_step", -1)), state)
+    fail_step = Map.get(args, "fail_step", -1)
 
-      {:error, reason} ->
-        {:error, reason, state}
+    with {:ok, normalized} <- validate_domain(d),
+         :ok <- validate_fail_step(p, fail_step) do
+      tuple_result(Taskweft.replan(normalized, p, fail_step), state)
+    else
+      {:error, reason} -> {:error, reason, state}
     end
   end
 
@@ -187,6 +188,38 @@ defmodule Taskweft.MCP.Server do
       {:ok, json}
     end
   end
+
+  # `fail_step = -1` means full replan (no completed prefix). Any other
+  # value must point at a real index in the plan; otherwise the planner
+  # silently treats it as past-the-end success.
+  defp validate_fail_step(_plan_json, -1), do: :ok
+
+  defp validate_fail_step(plan_json, fail_step)
+       when is_integer(fail_step) and fail_step >= 0 do
+    case decode_plan(plan_json) do
+      {:ok, plan} when is_list(plan) ->
+        if fail_step < length(plan),
+          do: :ok,
+          else: {:error, "fail_step #{fail_step} out of range for plan of length #{length(plan)}"}
+
+      _ ->
+        # malformed plan_json — let the planner / future #43 fix decide
+        :ok
+    end
+  end
+
+  defp validate_fail_step(_plan_json, fail_step),
+    do: {:error, "fail_step must be an integer >= -1, got #{inspect(fail_step)}"}
+
+  defp decode_plan(plan_json) when is_binary(plan_json) do
+    case Jason.decode(plan_json) do
+      {:ok, list} when is_list(list) -> {:ok, list}
+      {:ok, %{"plan" => list}} when is_list(list) -> {:ok, list}
+      _ -> :error
+    end
+  end
+
+  defp decode_plan(_), do: :error
 
   defp text_result(result, state) when is_binary(result),
     do: {:ok, %{content: [text(result)]}, state}
