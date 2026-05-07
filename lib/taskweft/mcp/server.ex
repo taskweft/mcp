@@ -10,7 +10,6 @@ defmodule Taskweft.MCP.Server do
   |------|-------------|
   | `plan` | Run the HTN planner over a JSON-LD domain |
   | `replan` | Recover from a failed plan step |
-  | `simulate` | Monte Carlo simulate a plan with stochastic action failure |
   | `solve_minizinc` | Forward a MiniZinc model to the configured minizinc peer |
 
   `check_temporal` is not exposed; temporal validity is checked on the
@@ -35,7 +34,6 @@ defmodule Taskweft.MCP.Server do
 
   plan_tool     = mcp.tool("plan")
   replan_tool   = mcp.tool("replan")
-  simulate_tool = mcp.tool("simulate")
 
   class PlanModule(dspy.Module):
       def forward(self, domain_json):
@@ -83,29 +81,6 @@ defmodule Taskweft.MCP.Server do
         fail_step: %{type: "integer", default: -1}
       },
       required: ["domain_json", "plan_json"]
-    })
-  end
-
-  deftool "simulate" do
-    meta do
-      description(
-        "Simulate a plan against a domain with stochastic per-action failure. `probs_json` is a JSON object mapping action names to success probabilities in [0, 1] (use `{}` for no failures). `seed` makes failures reproducible."
-      )
-    end
-
-    input_schema(%{
-      type: "object",
-      properties: %{
-        domain_json: %{type: "string"},
-        plan_json: %{type: "string"},
-        probs_json: %{
-          type: "string",
-          description:
-            "JSON object mapping action names to success probabilities. Use `\"{}\"` for no failures."
-        },
-        seed: %{type: "integer"}
-      },
-      required: ["domain_json", "plan_json", "probs_json", "seed"]
     })
   end
 
@@ -204,21 +179,6 @@ defmodule Taskweft.MCP.Server do
     end
   end
 
-  defprompt "simulate_plan" do
-    meta do
-      name("Simulate a plan")
-
-      description(
-        "Sample workflow — Monte Carlo simulate a plan with stochastic per-action failure."
-      )
-    end
-
-    arguments do
-      arg(:domain, required: false, description: "Domain file name")
-      arg(:seed, required: false, description: "Seed for reproducibility")
-    end
-  end
-
   # ---------- HANDLERS ----------
 
   @impl true
@@ -227,24 +187,6 @@ defmodule Taskweft.MCP.Server do
 
   def handle_tool_call("replan", %{"domain_json" => d, "plan_json" => p} = args, state) do
     tuple_result(Taskweft.replan(d, p, Map.get(args, "fail_step", -1)), state)
-  end
-
-  def handle_tool_call(
-        "simulate",
-        %{"domain_json" => d, "plan_json" => p, "probs_json" => probs, "seed" => seed},
-        state
-      ) do
-    tuple_result(safe_mc_execute(d, p, probs, seed), state)
-  end
-
-  # Mirrors the {:ok, _} | {:error, _} contract of Taskweft.plan/3 and
-  # Taskweft.replan/3 for the simulate path. NIF.mc_execute/4 still raises
-  # RuntimeError on planner failure (e.g. depth-exceeded, no-plan); convert to
-  # an error tuple so a malformed input never kills the MCP GenServer.
-  defp safe_mc_execute(d, p, probs, seed) do
-    {:ok, NIF.mc_execute(d, p, probs, seed)}
-  rescue
-    e -> {:error, Exception.message(e)}
   end
 
   def handle_tool_call("solve_minizinc", %{"model" => model} = args, state) do
@@ -275,8 +217,8 @@ defmodule Taskweft.MCP.Server do
   defp text_result(result, state) when is_binary(result),
     do: {:ok, %{content: [text(result)]}, state}
 
-  # Unwrap the {:ok, _} | {:error, _} returned by Taskweft.plan/3,
-  # Taskweft.replan/3, and safe_mc_execute/4 into the MCP handler reply shape.
+  # Unwrap the {:ok, _} | {:error, _} returned by Taskweft.plan/3 and
+  # Taskweft.replan/3 into the MCP handler reply shape.
   defp tuple_result({:ok, result}, state) when is_binary(result),
     do: text_result(result, state)
 
@@ -403,23 +345,6 @@ defmodule Taskweft.MCP.Server do
     2. Reuse the previously-returned `plan_json`.
     3. Call `replan` with `fail_step=#{fail_step}`.
     4. Report the new plan and what changed relative to the original.
-    """
-
-    {:ok, %{messages: [user(text)]}, state}
-  end
-
-  def handle_prompt_get("simulate_plan", args, state) do
-    domain = Map.get(args, "domain", "<domain>.jsonld")
-    seed = Map.get(args, "seed", "0")
-
-    text = """
-    Run a Monte Carlo simulation of a plan with stochastic per-action failure.
-
-    1. Read resource `taskweft://domains/#{domain}`.
-    2. Reuse the most recent `plan_json`.
-    3. Build `probs_json` — a JSON object mapping each action name to its success probability in [0, 1].
-    4. Call `simulate` with `seed=#{seed}` for reproducibility.
-    5. Report which steps succeeded, which failed, and at what simulated time.
     """
 
     {:ok, %{messages: [user(text)]}, state}
