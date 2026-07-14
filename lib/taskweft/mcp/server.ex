@@ -4,15 +4,26 @@ defmodule Taskweft.MCP.Server do
 
   Start with `mix taskweft.mcp` (stdio) or `mix taskweft.mcp --http`.
 
+  The planner model is **RECTGTN** — Relationship-Enabled Capability-Temporal
+  Goal-Task-Network. A domain's `tasks` hold three task kinds: `TwCall` call
+  arrays (`'E'`/`'T'`), `TwGoal` goal bindings (`'G'`, the top-level `goals`
+  key), and `TwMultiGoal` `{"multigoal": …}` entries (`'N'`). The `plan` tool's
+  `domain_json` description documents all three with golden and rejected shapes.
+
   ## Tools
 
   | Tool | Description |
   |------|-------------|
-  | `plan` | Run the HTN planner over a JSON-LD domain |
+  | `plan` | Run the HTN planner over a JSON-LD domain (TwCall / TwGoal / TwMultiGoal) |
   | `replan` | Recover from a failed plan step |
 
   `check_temporal` is not exposed; temporal validity is checked on the plan
   output. ReBAC, bridge, and cache NIF entrypoints are not exposed.
+
+  ## Prompts
+
+  `plan_problem` (solve a problem/domain pair), `plan_goal` (build a TwGoal or
+  TwMultiGoal problem), `replan_after_failure`, and `work_queue`.
 
   ## Resources
 
@@ -36,7 +47,8 @@ defmodule Taskweft.MCP.Server do
     param(:domain_json, :string,
       required: true,
       description: """
-      A JSON-LD HTN domain (pointer-based IPyHOP). Shape:
+      A JSON-LD HTN domain for the RECTGTN planner (Relationship-Enabled
+      Capability-Temporal Goal-Task-Network; pointer-based IPyHOP). Shape:
         "@context": {"vsekai": "https://v-sekai.org/", "domain": "vsekai:planning/domain/"}
         "@type": "domain:Definition", "name": <string>
         "variables": [{"name": <v>, "init": {<key>: <value>, ...}}]   # state; NOT a flat "state" object
@@ -46,9 +58,17 @@ defmodule Taskweft.MCP.Server do
                              "alternatives": [{"name": <alt>,
                                                "check": [{"pointer": "/path", "eq": <v>}],   # optional guard
                                                "subtasks": [[<call>, <arg>...], ...]}]}}
-        "tasks": [[<call>, <arg>...], ...]   # call-arrays, NOT bare strings
+        "goals": {<var>: {"params": [<p>...], "alternatives": [...]}}   # optional goal methods (TwGoal 'G')
+        "tasks": [<task>, ...]
+      Each <task> is ONE of three RECTGTN task kinds:
+        1. TwCall  ('E'/'T') — a call-array [<name>, <arg>...]; a bare string is NOT a call.
+        2. TwGoal  ('G')     — top-level "goals": [{"pointer": "/var/key", "eq": <desired>}, ...]
+                               (a conjunctive goal solved by the "goals" goal-methods above).
+        3. TwMultiGoal ('N') — a task object {"multigoal": {<var>: {<key>: <desired>, ...}, ...}};
+                               the planner backjumps over which binding to satisfy first.
+      A "tasks" list may mix call-arrays and {"multigoal": ...} objects freely.
       Effects use "pointer/set" (the legacy "set" op is rejected). {curly} names in
-      paths/values are substituted from action/method params. Minimal example:
+      paths/values are substituted from action/method params. Minimal TwCall example:
         {"@context":{"vsekai":"https://v-sekai.org/","domain":"vsekai:planning/domain/"},
          "@type":"domain:Definition","name":"demo",
          "variables":[{"name":"done","init":{"a":false,"b":false}}],
@@ -56,6 +76,17 @@ defmodule Taskweft.MCP.Server do
                     "do_b":{"params":[],"body":[{"pointer/set":"/done/b","value":true}]}},
          "methods":{"top":{"params":[],"alternatives":[{"name":"seq","subtasks":[["do_a"],["do_b"]]}]}},
          "tasks":[["top"]]}
+      Minimal TwGoal problem (state + desired bindings, methods come from the domain):
+        {"@type":"domain:Problem","name":"switch_goal",
+         "variables":[{"name":"switch","init":{"x":false}}],
+         "goals":[{"pointer":"/switch/x","eq":true}]}
+      Minimal TwMultiGoal problem:
+        {"@type":"domain:Problem","name":"switch_multigoal",
+         "variables":[{"name":"switch","init":{"x":false,"y":false}}],
+         "tasks":[{"multigoal":{"switch":{"x":true,"y":true}}}]}
+      Rejected shapes (Loader.validate): a "goals" binding missing "pointer"/"eq";
+      an empty {"multigoal":{}} or a multigoal var bound to a non-object; an object
+      task that is not a {"multigoal": ...} entry.
       """
     )
 
@@ -139,6 +170,36 @@ defmodule Taskweft.MCP.Server do
 
       message(
         "Read taskweft://domains/#{domain} and taskweft://problems/#{problem}, then call the `plan` tool with the combined JSON-LD domain.",
+        state
+      )
+    end)
+  end
+
+  prompt "plan_goal",
+         "Sample workflow — solve a goal or multigoal (RECTGTN 'G'/'N') against a domain via the `plan` tool." do
+    title("Plan a goal / multigoal")
+    arg(:domain, required: false, description: "Domain file name, e.g. blocks_world.jsonld")
+
+    arg(:kind, required: false, description: ~s|Task kind: "goal" (TwGoal) or "multigoal" (TwMultiGoal)|)
+
+    render(fn args, state ->
+      domain = args[:domain] || "<domain>.jsonld"
+      kind = args[:kind] || "goal"
+
+      shape =
+        if kind == "multigoal" do
+          ~s(a task object `{"multigoal": {<var>: {<key>: <desired>, ...}}}` in "tasks")
+        else
+          ~s(a top-level `"goals": [{"pointer": "/var/key", "eq": <desired>}, ...]` binding array)
+        end
+
+      message(
+        "Read taskweft://domains/#{domain} for its actions, methods, and goal methods. " <>
+          "Build a domain:Problem whose desired end-state is expressed as #{shape} " <>
+          "(RECTGTN #{if kind == "multigoal", do: "'N' TwMultiGoal", else: "'G' TwGoal"}), " <>
+          "then call the `plan` tool with the merged domain. The planner solves each " <>
+          "binding via the domain's goal methods; a multigoal additionally backjumps " <>
+          "over which binding to satisfy first.",
         state
       )
     end)
