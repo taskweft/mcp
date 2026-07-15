@@ -41,7 +41,16 @@ defmodule Taskweft.MCP.Server do
   """
 
   use ExMCP.Server.Handler
-  use ExMCP.Server.DSL, name: "taskweft", version: "0.1.0"
+
+  # ex_mcp's DSL captures `use` opts as raw unevaluated AST (server_info/2 in
+  # ex_mcp's dsl.ex just calls to_string/1 directly on whatever we pass) — a
+  # module attribute or function call here does NOT get evaluated, only a
+  # plain literal survives. So this one has to be a hand-written literal,
+  # kept in sync with mix.exs's @version by convention. This is exactly how
+  # it drifted to a stale "0.1.0" before — the other version reference below
+  # (a genuine runtime function, no macro constraint) instead derives itself
+  # from Application.spec/2 so it can never desync again.
+  use ExMCP.Server.DSL, name: "taskweft", version: "0.2.0-dev.3"
 
   @plans_root Path.join(:code.priv_dir(:taskweft_plans) |> to_string(), "plans") |> Path.expand()
 
@@ -186,7 +195,8 @@ defmodule Taskweft.MCP.Server do
     mime_type("application/json")
 
     read(fn _args, _state ->
-      {:ok, Jason.encode!(%{"name" => "taskweft", "version" => "0.1.0"})}
+      version = Application.spec(:taskweft_mcp, :vsn) |> to_string()
+      {:ok, Jason.encode!(%{"name" => "taskweft", "version" => version})}
     end)
   end
 
