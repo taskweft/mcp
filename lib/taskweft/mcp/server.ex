@@ -50,7 +50,7 @@ defmodule Taskweft.MCP.Server do
   # it drifted to a stale "0.1.0" before — the other version reference below
   # (a genuine runtime function, no macro constraint) instead derives itself
   # from Application.spec/2 so it can never desync again.
-  use ExMCP.Server.DSL, name: "taskweft", version: "0.2.0-dev.3"
+  use ExMCP.Server.DSL, name: "taskweft", version: "0.2.0-dev.4"
 
   @plans_root Path.join(:code.priv_dir(:taskweft_plans) |> to_string(), "plans") |> Path.expand()
 
