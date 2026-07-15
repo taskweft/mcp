@@ -18,7 +18,7 @@ defmodule Mix.Tasks.Taskweft.Mcp do
           "taskweft": {
             "command": "mix",
             "args": ["taskweft.mcp"],
-            "cwd": "/home/ernest.lee/multiplayer-fabric-taskweft"
+            "cwd": "/path/to/multiplayer-fabric-taskweft"
           }
         }
       }
