@@ -51,7 +51,8 @@ defmodule Taskweft.MCP.Server do
 
   # ---------- TOOLS ----------
 
-  tool "plan", "Run the IPyHOP-style HTN planner over a JSON-LD domain. Returns the plan as JSON." do
+  tool "plan",
+       "Run the IPyHOP-style HTN planner over a JSON-LD domain. Returns the plan as JSON." do
     param(:domain_json, :string,
       required: true,
       description: """
@@ -133,10 +134,18 @@ defmodule Taskweft.MCP.Server do
       """
     )
 
-    run(fn %{domain_json: domain_json}, state ->
+    param(:explain, :boolean,
+      required: false,
+      description:
+        "When true, include an explain tree for successful plans and return structured no_plan diagnostics instead of a bare failure token."
+    )
+
+    run(fn %{domain_json: domain_json} = args, state ->
+      explain = Map.get(args, :explain, false)
+
       guarded(state, fn ->
         with {:ok, normalized} <- validate_domain(domain_json) do
-          Taskweft.plan(normalized)
+          plan_with_optional_explain(normalized, explain)
         end
       end)
     end)
@@ -202,7 +211,8 @@ defmodule Taskweft.MCP.Server do
     end)
   end
 
-  prompt "plan_problem", "Sample workflow — solve a problem against a domain via the `plan` tool." do
+  prompt "plan_problem",
+         "Sample workflow — solve a problem against a domain via the `plan` tool." do
     title("Plan a problem")
     arg(:domain, required: false, description: "Domain file name, e.g. blocks_world.jsonld")
     arg(:problem, required: false, description: "Problem file name, e.g. blocks_world_1a.jsonld")
@@ -254,7 +264,11 @@ defmodule Taskweft.MCP.Server do
   prompt "plan_capability_temporal",
          "Sample workflow — build a domain using capability guards and/or action durations (RECTGTN 'R'/'C'/'T'), then plan it." do
     title("Plan with capabilities / temporal duration")
-    arg(:domain, required: false, description: "Domain file name, e.g. entity_capabilities.jsonld or temporal_travel.jsonld")
+
+    arg(:domain,
+      required: false,
+      description: "Domain file name, e.g. entity_capabilities.jsonld or temporal_travel.jsonld"
+    )
 
     render(fn args, state ->
       domain = args[:domain] || "entity_capabilities.jsonld"
@@ -338,6 +352,289 @@ defmodule Taskweft.MCP.Server do
   end
 
   defp decode_plan(_), do: {:error, "plan_json must be a JSON string"}
+
+  defp plan_with_optional_explain(normalized, false), do: Taskweft.plan(normalized)
+
+  defp plan_with_optional_explain(normalized, true) do
+    case Taskweft.plan(normalized) do
+      {:ok, result_json} ->
+        with {:ok, domain} <- Jason.decode(normalized),
+             {:ok, result} <- Jason.decode(result_json) do
+          explain = %{
+            "mode" => "explain",
+            "status" => "ok",
+            "summary" => "plan found",
+            "solution_tree" => build_solution_tree(result),
+            "diagnostics" => scan_domain_diagnostics(domain)
+          }
+
+          {:ok, Jason.encode!(Map.put(result, "explain", explain))}
+        else
+          _ -> {:ok, result_json}
+        end
+
+      {:error, "no_plan"} ->
+        with {:ok, domain} <- Jason.decode(normalized) do
+          payload = %{
+            "status" => "no_plan",
+            "explain" => %{
+              "mode" => "explain",
+              "status" => "no_plan",
+              "summary" => "planner returned no_plan",
+              "failure_tree" => build_failure_tree(domain),
+              "diagnostics" => scan_domain_diagnostics(domain)
+            }
+          }
+
+          {:ok, Jason.encode!(payload)}
+        else
+          _ -> {:error, "no_plan"}
+        end
+
+      other ->
+        other
+    end
+  end
+
+  defp build_solution_tree(%{"plan" => plan} = result) when is_list(plan) do
+    temporal_steps = get_in(result, ["temporal", "steps"])
+
+    children =
+      Enum.with_index(plan)
+      |> Enum.map(fn {step, index} ->
+        action = List.first(step)
+        args = Enum.drop(step, 1)
+        temporal = if is_list(temporal_steps), do: Enum.at(temporal_steps, index), else: nil
+
+        %{
+          "kind" => "action",
+          "index" => index,
+          "action" => action,
+          "args" => args,
+          "temporal" => temporal
+        }
+      end)
+
+    %{
+      "kind" => "root",
+      "label" => "plan_execution",
+      "children" => children
+    }
+  end
+
+  defp build_solution_tree(_),
+    do: %{"kind" => "root", "label" => "plan_execution", "children" => []}
+
+  defp build_failure_tree(domain) when is_map(domain) do
+    tasks = Map.get(domain, "tasks", [])
+    actions = Map.keys(Map.get(domain, "actions", %{})) |> MapSet.new()
+    methods = Map.keys(Map.get(domain, "methods", %{})) |> MapSet.new()
+    goals = Map.keys(Map.get(domain, "goals", %{})) |> MapSet.new()
+
+    children =
+      tasks
+      |> Enum.with_index()
+      |> Enum.map(fn {task, index} ->
+        case task do
+          [name | args] when is_binary(name) ->
+            resolvable =
+              MapSet.member?(actions, name) or MapSet.member?(methods, name) or
+                MapSet.member?(goals, name)
+
+            %{
+              "kind" => "task",
+              "index" => index,
+              "name" => name,
+              "args" => args,
+              "resolvable" => resolvable
+            }
+
+          %{"multigoal" => mg} when is_map(mg) ->
+            %{
+              "kind" => "multigoal",
+              "index" => index,
+              "bindings" => mg
+            }
+
+          other ->
+            %{
+              "kind" => "task",
+              "index" => index,
+              "raw" => other,
+              "resolvable" => false
+            }
+        end
+      end)
+
+    %{
+      "kind" => "root",
+      "label" => "planning_failure",
+      "children" => children
+    }
+  end
+
+  defp build_failure_tree(_),
+    do: %{"kind" => "root", "label" => "planning_failure", "children" => []}
+
+  defp scan_domain_diagnostics(domain) when is_map(domain) do
+    eval_ops = valid_eval_ops()
+    actions = Map.get(domain, "actions", %{})
+    methods = Map.get(domain, "methods", %{})
+    goals = Map.get(domain, "goals", %{})
+
+    symbols =
+      Map.keys(actions)
+      |> Kernel.++(Map.keys(methods))
+      |> Kernel.++(Map.keys(goals))
+      |> MapSet.new()
+
+    unknown_subtasks =
+      methods
+      |> Enum.flat_map(fn {method_name, method} ->
+        method
+        |> Map.get("alternatives", [])
+        |> Enum.with_index()
+        |> Enum.flat_map(fn {alt, alt_idx} ->
+          alt
+          |> Map.get("subtasks", [])
+          |> Enum.with_index()
+          |> Enum.flat_map(fn {subtask, sub_idx} ->
+            case subtask do
+              [name | _] when is_binary(name) ->
+                if MapSet.member?(symbols, name) do
+                  []
+                else
+                  [
+                    %{
+                      "severity" => "error",
+                      "type" => "unknown_subtask_symbol",
+                      "method" => method_name,
+                      "alternative" => alt_idx,
+                      "subtask" => sub_idx,
+                      "symbol" => name
+                    }
+                  ]
+                end
+
+              _ ->
+                []
+            end
+          end)
+        end)
+      end)
+
+    check_issues =
+      methods
+      |> Enum.flat_map(fn {method_name, method} ->
+        method
+        |> Map.get("alternatives", [])
+        |> Enum.with_index()
+        |> Enum.flat_map(fn {alt, alt_idx} ->
+          alt
+          |> Map.get("check", [])
+          |> Enum.with_index()
+          |> Enum.flat_map(fn {check, check_idx} ->
+            cond do
+              is_map(check) and Map.has_key?(check, "pointer") ->
+                [
+                  %{
+                    "severity" => "error",
+                    "type" => "legacy_check_syntax",
+                    "method" => method_name,
+                    "alternative" => alt_idx,
+                    "check" => check_idx
+                  }
+                ]
+
+              is_map(check) and is_map(check["eval"]) ->
+                eval_type = get_in(check, ["eval", "type"]) || ""
+
+                if eval_type in eval_ops do
+                  []
+                else
+                  [
+                    %{
+                      "severity" => "error",
+                      "type" => "unknown_eval_operator",
+                      "method" => method_name,
+                      "alternative" => alt_idx,
+                      "check" => check_idx,
+                      "operator" => eval_type
+                    }
+                  ]
+                end
+
+              true ->
+                []
+            end
+          end)
+        end)
+      end)
+
+    capability_issues =
+      case get_in(domain, ["capabilities", "actions"]) do
+        cap_actions when is_map(cap_actions) ->
+          Enum.flat_map(cap_actions, fn {action_name, _caps} ->
+            case Map.get(actions, action_name) do
+              %{"params" => [first | _]} when is_binary(first) ->
+                if first == "agent" do
+                  []
+                else
+                  [
+                    %{
+                      "severity" => "warning",
+                      "type" => "capability_actor_param_not_first_agent",
+                      "action" => action_name,
+                      "first_param" => first
+                    }
+                  ]
+                end
+
+              %{"params" => []} ->
+                [
+                  %{
+                    "severity" => "warning",
+                    "type" => "capability_actor_param_missing",
+                    "action" => action_name
+                  }
+                ]
+
+              nil ->
+                [
+                  %{
+                    "severity" => "warning",
+                    "type" => "capability_action_missing_definition",
+                    "action" => action_name
+                  }
+                ]
+
+              _ ->
+                []
+            end
+          end)
+
+        _ ->
+          []
+      end
+
+    unknown_subtasks ++ check_issues ++ capability_issues
+  end
+
+  defp scan_domain_diagnostics(_), do: []
+
+  defp valid_eval_ops do
+    [
+      "math/eq",
+      "math/neq",
+      "math/lt",
+      "math/le",
+      "math/gt",
+      "math/ge",
+      "math/and",
+      "math/or",
+      "math/not"
+    ]
+  end
 
   # Run a planner call, converting any {:error, _} into the MCP error shape and
   # any raised exception / exit / thrown value into a clean {:error, _} result —
