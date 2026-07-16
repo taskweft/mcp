@@ -50,7 +50,7 @@ defmodule Taskweft.MCP.Server do
   # it drifted to a stale "0.1.0" before — the other version reference below
   # (a genuine runtime function, no macro constraint) instead derives itself
   # from Application.spec/2 so it can never desync again.
-  use ExMCP.Server.DSL, name: "taskweft", version: "0.2.0-dev.6"
+  use ExMCP.Server.DSL, name: "taskweft", version: "0.2.0-dev.7"
 
   # JSON-LD validation lives in the parent app (`Taskweft.JSONLD.Loader`) so this
   # dep stays circular-free; standalone runs skip validation.
@@ -610,7 +610,13 @@ defmodule Taskweft.MCP.Server do
       "math/ge",
       "math/and",
       "math/or",
-      "math/not"
+      "math/not",
+      # Capability requirements now compile to this op (taskweft/nif's
+      # eval_node, tw_loader.hpp) rather than a bespoke guard mechanism, so
+      # it's also directly authorable in an ordinary method/goal-method
+      # "check" clause: {"eval": {"type": "rebac/check", "rel": <string-or-
+      # relation-expr>, "subject": <expr>, "object": <expr>}}.
+      "rebac/check"
     ]
   end
 
