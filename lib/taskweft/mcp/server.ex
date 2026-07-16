@@ -155,7 +155,10 @@ defmodule Taskweft.MCP.Server do
       guarded(state, fn ->
         domain_json = Map.fetch!(args, :domain_json)
         explain = Map.get(args, :explain, false)
-        plan_with_optional_explain(domain_json, explain)
+
+        with :ok <- ensure_json(domain_json) do
+          plan_with_optional_explain(domain_json, explain)
+        end
       end)
     end)
   end
@@ -176,7 +179,8 @@ defmodule Taskweft.MCP.Server do
         plan_json = Map.fetch!(args, :plan_json)
         fail_step = Map.get(args, :fail_step, -1)
 
-        with {:ok, steps} <- decode_plan(plan_json),
+        with :ok <- ensure_json(domain_json),
+             {:ok, steps} <- decode_plan(plan_json),
              :ok <- validate_fail_step(steps, fail_step) do
           # tw_replan wants a bare top-level step array; the {"plan":[...]} envelope
           # that `plan` returns silently parses to 0 steps (#43), so re-encode the
@@ -384,6 +388,22 @@ defmodule Taskweft.MCP.Server do
   end
 
   defp decode_plan(_), do: {:error, "plan_json must be a JSON string"}
+
+  # `plan`/`replan` intentionally skip RECTGTN structural validation (that's
+  # `validate`'s job) and hand domain_json straight to the NIF. But the NIF's
+  # own minimal JSON parser (tw_loader.hpp) doesn't reject malformed JSON —
+  # it silently parses a truncated/garbled document into an empty domain,
+  # so a syntax error in domain_json comes back as a bogus {"plan":[],
+  # "status":"ok"} instead of an error. This is a syntax check only (same
+  # class of guard decode_plan/1 already does for plan_json), not a shape
+  # check — a syntactically valid document with the wrong RECTGTN shape
+  # still passes through untouched, per "assume it'll work".
+  defp ensure_json(json) when is_binary(json) do
+    case Jason.decode(json) do
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, "domain_json is not valid JSON: #{Exception.message(reason)}"}
+    end
+  end
 
   defp plan_with_optional_explain(domain_json, false), do: Taskweft.plan(domain_json)
 
