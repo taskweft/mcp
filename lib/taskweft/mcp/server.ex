@@ -8,9 +8,10 @@ defmodule Taskweft.MCP.Server do
   Goal-Task-Network. A domain's `todo_list` (GTPyHOP's own term for this
   heterogeneous list) holds three task kinds: `TwCall` call arrays
   (`'E'`/`'T'`), `TwGoal` `{"goal": [...]}` entries (`'G'`, conjunctive
-  bindings satisfied via the domain's `goals` methods map — a separate,
-  unrelated top-level key), and `TwMultiGoal` `{"multigoal": …}` entries
-  (`'N'`). Two more layers apply on top of any task kind: capability guards
+  bindings satisfied via a goal method — an ordinary `methods` entry named
+  after the state var it targets; there's no separate `goals` key), and
+  `TwMultiGoal` `{"multigoal": …}` entries (`'N'`). Two more layers apply on
+  top of any task kind: capability guards
   (`'R'`/`'C'`, top-level `capabilities`) and per-action temporal duration
   (`'T'`, an action's `duration` field). The `plan` tool's `domain_json`
   description documents all five with golden shapes (and rejected shapes for
@@ -81,7 +82,6 @@ defmodule Taskweft.MCP.Server do
                              "alternatives": [{"name": <alt>,
                                                "check": [{"pointer": "/path", "eq": <v>}],   # optional guard
                                                "subtasks": [[<call>, <arg>...], ...]}]}}
-        "goals": {<var>: {"params": [<p>...], "alternatives": [...]}}   # optional goal methods (TwGoal 'G')
         "capabilities": {"entities": {<entity>: [<cap>...]}, "actions": {<name>: [<cap>...]}}
                                                              # optional ReBAC capability guards (RECTGTN 'R'/'C')
         "todo_list": [<task>, ...]
@@ -89,7 +89,9 @@ defmodule Taskweft.MCP.Server do
       (find_plan(state, todo_list)). Each <task> is ONE of three RECTGTN task kinds:
         1. TwCall  ('E'/'T') — a call-array [<name>, <arg>...]; a bare string is NOT a call.
         2. TwGoal  ('G')     — a todo_list entry {"goal": [{"pointer": "/var/key", "eq": <desired>}, ...]}
-                               (a conjunctive goal solved by the "goals" goal-methods above).
+                               (a conjunctive goal solved by a goal method — an ordinary "methods"
+                               entry named after the state var it targets; there is no separate
+                               "goals" key, a goal method IS an ordinary method).
         3. TwMultiGoal ('N') — a todo_list entry {"multigoal": {<var>: {<key>: <desired>, ...}, ...}};
                                the planner backjumps over which binding to satisfy first.
       A "todo_list" may mix call-arrays, {"goal": [...]}, and {"multigoal": ...} objects freely.
@@ -103,7 +105,7 @@ defmodule Taskweft.MCP.Server do
           capability the action requires — an agent lacking one silently can't take that path, so the
           planner tries the next alternative (or reports no plan if none qualify). This is a plan-time
           guard, not a load-time check: Loader.validate does not structurally validate "capabilities"
-          (unlike "goals"/"todo_list" below) — a malformed shape is simply ignored by the NIF's loader.
+          (unlike "todo_list" below) — a malformed shape is simply ignored by the NIF's loader.
         * Temporal duration ('T') — a per-action "duration": "<ISO8601>" field (e.g. "PT5M", "PT1H30M").
           Every `plan` response already includes a "temporal" block (STN consistency + per-step
           start/end) computed from these durations; actions without a "duration" default to "PT0S".
@@ -289,11 +291,12 @@ defmodule Taskweft.MCP.Server do
         end
 
       message(
-        "Read taskweft://domains/#{domain} for its actions, methods, and goal methods. " <>
+        "Read taskweft://domains/#{domain} for its actions and methods (goal methods are " <>
+          "ordinary methods named after the state var they target, not a separate key). " <>
           "Build a domain:Problem whose desired end-state is expressed as #{shape} " <>
           "(RECTGTN #{if kind == "multigoal", do: "'N' TwMultiGoal", else: "'G' TwGoal"}), " <>
           "then call the `plan` tool with the merged domain. The planner solves each " <>
-          "binding via the domain's goal methods; a multigoal additionally backjumps " <>
+          "binding via the matching goal method; a multigoal additionally backjumps " <>
           "over which binding to satisfy first.",
         state
       )
@@ -460,23 +463,12 @@ defmodule Taskweft.MCP.Server do
     actions = Map.get(domain, "actions", %{})
     methods = Map.get(domain, "methods", %{})
 
-    # "goals" has two valid shapes (Loader.check_goals/1): a domain-style map
-    # of goal-method definitions keyed by state var name (whose keys are
-    # callable symbols, same as actions/methods), or a problem-style array of
-    # {"pointer", "eq"} bindings — which defines no callable symbols at all.
-    # Map.keys/1 on the array form raised BadMapError ("expected a map, got:
-    # [...]"), crashing every `plan`/`replan` call with `explain: true` on an
-    # otherwise-valid TwGoal problem document.
-    goal_symbols =
-      case Map.get(domain, "goals", %{}) do
-        goals when is_map(goals) -> Map.keys(goals)
-        _ -> []
-      end
-
+    # There is no separate "goals" key — a goal method is an ordinary
+    # "methods" entry named after the state var it targets, so it's already
+    # covered by methods' keys here.
     symbols =
       Map.keys(actions)
       |> Kernel.++(Map.keys(methods))
-      |> Kernel.++(goal_symbols)
       |> MapSet.new()
 
     unknown_subtasks =
