@@ -239,12 +239,15 @@ defmodule Taskweft.MCP.Server do
   # ---------- PROMPTS ----------
 
   prompt "work_queue",
-         "Stored skill — read taskweft://problems/work_queue.jsonld and report decoded status." do
+         "Stored skill — read taskweft://problems/work_queue.jsonld and its sibling .notes.json, and report decoded status." do
     title("Work queue status")
 
     render(fn _args, state ->
       message(
-        "Read the resource taskweft://problems/work_queue.jsonld and report the decoded status: phases, pass conditions, scenarios, and stack readiness.",
+        "Read the resources taskweft://problems/work_queue.jsonld (the plannable state/todo_list) " <>
+          "and taskweft://problems/work_queue.notes.json (human/LLM-facing status metadata, not " <>
+          "part of the planning document) and report the decoded status: phases, pass conditions, " <>
+          "scenarios, and stack readiness.",
         state
       )
     end)
