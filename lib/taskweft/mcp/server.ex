@@ -50,7 +50,7 @@ defmodule Taskweft.MCP.Server do
   # it drifted to a stale "0.1.0" before — the other version reference below
   # (a genuine runtime function, no macro constraint) instead derives itself
   # from Application.spec/2 so it can never desync again.
-  use ExMCP.Server.DSL, name: "taskweft", version: "0.2.0-dev.4"
+  use ExMCP.Server.DSL, name: "taskweft", version: "0.2.0-dev.6"
 
   # JSON-LD validation lives in the parent app (`Taskweft.JSONLD.Loader`) so this
   # dep stays circular-free; standalone runs skip validation.
@@ -446,12 +446,24 @@ defmodule Taskweft.MCP.Server do
     eval_ops = valid_eval_ops()
     actions = Map.get(domain, "actions", %{})
     methods = Map.get(domain, "methods", %{})
-    goals = Map.get(domain, "goals", %{})
+
+    # "goals" has two valid shapes (Loader.check_goals/1): a domain-style map
+    # of goal-method definitions keyed by state var name (whose keys are
+    # callable symbols, same as actions/methods), or a problem-style array of
+    # {"pointer", "eq"} bindings — which defines no callable symbols at all.
+    # Map.keys/1 on the array form raised BadMapError ("expected a map, got:
+    # [...]"), crashing every `plan`/`replan` call with `explain: true` on an
+    # otherwise-valid TwGoal problem document.
+    goal_symbols =
+      case Map.get(domain, "goals", %{}) do
+        goals when is_map(goals) -> Map.keys(goals)
+        _ -> []
+      end
 
     symbols =
       Map.keys(actions)
       |> Kernel.++(Map.keys(methods))
-      |> Kernel.++(Map.keys(goals))
+      |> Kernel.++(goal_symbols)
       |> MapSet.new()
 
     unknown_subtasks =
